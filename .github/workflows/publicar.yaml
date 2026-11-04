@@ -1,0 +1,44 @@
+name: Publicar sitio
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+concurrency:
+  group: publicar-sitio
+  cancel-in-progress: true
+jobs:
+  publicar:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          filter: blob:none
+      - id: prep
+        shell: bash
+        run: |
+          # Une sitio-parte-1.zip, sitio-parte-2.zip, ... (si hay dos archivos de la misma parte, usa el subido mas recientemente)
+          rm -rf _p _q; mkdir _p
+          ts() { local t; t="$(git log -1 --format=%ct -- "$1" 2>/dev/null)"; echo "${t:-0}"; }
+          declare -A PARTE TPARTE
+          while IFS= read -r f; do
+            n="$(printf '%s' "$f" | sed -E 's/^sitio-parte-([0-9]+).*/\1/')"; t="$(ts "$f")"
+            if [ -z "${PARTE[$n]:-}" ] || [ "$t" -gt "${TPARTE[$n]}" ] || { [ "$t" -eq "${TPARTE[$n]}" ] && [ "$f" = "sitio-parte-$n.zip" ]; }; then PARTE[$n]="$f"; TPARTE[$n]="$t"; fi
+          done < <(ls -1 sitio-parte-*.zip 2>/dev/null)
+          if [ ${#PARTE[@]} -gt 0 ]; then
+            for n in $(printf '%s\n' "${!PARTE[@]}" | sort -n); do echo "Uniendo ${PARTE[$n]}"; unzip -qo "${PARTE[$n]}" -d _p; done
+          else
+            Z=""; TZ=-1
+            while IFS= read -r f; do t="$(ts "$f")"; if [ "$t" -gt "$TZ" ]; then Z="$f"; TZ="$t"; fi; done < <(ls -1 *.zip 2>/dev/null)
+            if [ -n "$Z" ]; then echo "Publicando $Z"; unzip -qo "$Z" -d _p; fi
+          fi
+          rm -rf _p/__MACOSX
+          if [ ! -f _p/index.html ]; then d="$(dirname "$(find _p -mindepth 2 -maxdepth 2 -name index.html | head -n1)")"; if [ "$d" != . ]; then mv "$d" _q && rm -rf _p && mv _q _p; fi; fi
+          if [ -f sitio/index.html ]; then cp -R sitio/. _p/; fi
+          if [ -f _p/index.html ]; then echo "Archivos a publicar: $(find _p -type f | wc -l)"; echo "ok=1" >> "$GITHUB_OUTPUT"; else echo "Sin sitio que publicar"; fi
+      - if: steps.prep.outputs.ok == '1'
+        uses: cloudflare/wrangler-action@v4
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: pages deploy _p --project-name=betafaunaguardianes --branch=main --commit-dirty=true
